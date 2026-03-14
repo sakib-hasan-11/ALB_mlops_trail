@@ -1,0 +1,9 @@
+langchain==1.2.10
+langchain-community
+langchain-openai
+openai
+
+
+fastapi
+uvicorn
+streamlit
