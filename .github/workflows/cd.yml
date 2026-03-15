@@ -1,0 +1,121 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+env:
+  ECR_REPOSITORY: mlops_trail_images
+  API_IMAGE_NAME: mlops-trail-api
+  STREAMLIT_IMAGE_NAME: mlops-trail-streamlit
+
+jobs:
+  code-quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint with Pylint
+        run: |
+          pip install pylint
+          pylint app/ --fail-under=7.0 || true
+        continue-on-error: true
+
+      - name: Type check with mypy
+        run: |
+          pip install mypy
+          mypy app/ --ignore-missing-imports || true
+        continue-on-error: true
+
+      - name: Format check with black
+        run: |
+          pip install black
+          black --check app/ || true
+        continue-on-error: true
+
+  build-and-push:
+    name: Build & Push Images to ECR
+    runs-on: ubuntu-latest
+    needs: code-quality
+    if: github.event_name == 'push'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push API image to ECR
+        id: build-api-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+          GIT_BRANCH: ${{ github.ref_name }}
+        run: |
+          docker build -f Dockerfile.api -t $ECR_REGISTRY/$ECR_REPOSITORY:$API_IMAGE_NAME-latest \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$API_IMAGE_NAME-$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$API_IMAGE_NAME-$GIT_BRANCH .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$API_IMAGE_NAME-latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$API_IMAGE_NAME-$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$API_IMAGE_NAME-$GIT_BRANCH
+          echo "api-image-uri=$ECR_REGISTRY/$ECR_REPOSITORY:$API_IMAGE_NAME-$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Build, tag, and push Streamlit image to ECR
+        id: build-streamlit-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+          GIT_BRANCH: ${{ github.ref_name }}
+        run: |
+          docker build -f Dockerfile.streamlit -t $ECR_REGISTRY/$ECR_REPOSITORY:$STREAMLIT_IMAGE_NAME-latest \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$STREAMLIT_IMAGE_NAME-$IMAGE_TAG \
+            -t $ECR_REGISTRY/$ECR_REPOSITORY:$STREAMLIT_IMAGE_NAME-$GIT_BRANCH .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$STREAMLIT_IMAGE_NAME-latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$STREAMLIT_IMAGE_NAME-$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$STREAMLIT_IMAGE_NAME-$GIT_BRANCH
+          echo "streamlit-image-uri=$ECR_REGISTRY/$ECR_REPOSITORY:$STREAMLIT_IMAGE_NAME-$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Print image URIs
+        run: |
+          echo "API Image: ${{ steps.build-api-image.outputs.api-image-uri }}"
+          echo "Streamlit Image: ${{ steps.build-streamlit-image.outputs.streamlit-image-uri }}"
+
+      - name: Notify on success
+        if: success()
+        run: |
+          echo "✅ Both images built and pushed successfully!"
+          echo "API Image: ${{ steps.build-api-image.outputs.api-image-uri }}"
+          echo "Streamlit Image: ${{ steps.build-streamlit-image.outputs.streamlit-image-uri }}"
+
+      - name: Notify on failure
+        if: failure()
+        run: echo "❌ Build or push failed"
